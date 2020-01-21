@@ -152,7 +152,7 @@ functions:
             # If this was a patch build, doing a fresh clone would not actually test the patch
             cp -R ${PROJECT_DIRECTORY}/ $DRIVERS_TOOLS
           else
-            git clone git://github.com/mongodb-labs/drivers-evergreen-tools.git $DRIVERS_TOOLS
+            git clone --single-branch --branch change-ocsp-configs git@github.com:divjotarora/drivers-evergreen-tools.git $DRIVERS_TOOLS
           fi
           echo "{ \"releases\": { \"default\": \"$MONGODB_BINARIES\" }}" > $MONGO_ORCHESTRATION_HOME/orchestration.config
     - command: shell.exec
@@ -199,11 +199,33 @@ functions:
           cp ${PROJECT_DIRECTORY}/data/certificates/client.pem ${DRIVERS_TOOLS}/.evergreen/x509gen/client.pem
           cp ${PROJECT_DIRECTORY}/data/certificates/client.pem ${MONGO_ORCHESTRATION_HOME}/lib/client.pem
 
-          MONGODB_VERSION=${VERSION} TOPOLOGY=${TOPOLOGY} AUTH=${AUTH} SSL=${SSL} sh ${DRIVERS_TOOLS}/.evergreen/run-orchestration.sh
+          MONGODB_VERSION=${VERSION} \
+          TOPOLOGY=${TOPOLOGY} \
+          AUTH=${AUTH} \
+          SSL=${SSL} \
+          ORCHESTRATION_FILE=${ORCHESTRATION_FILE} \
+          sh ${DRIVERS_TOOLS}/.evergreen/run-orchestration.sh
     - command: expansions.update
       params:
         file: mo-expansion.yml
 
+  ocsp-bootstrap-mongo-orchestration:
+    - command: shell.exec
+      params:
+        script: |
+          ${PREPARE_SHELL}
+          cp ${PROJECT_DIRECTORY}/data/certificates/client.pem ${MONGO_ORCHESTRATION_HOME}/lib/client.pem
+
+          MONGODB_VERSION=${VERSION} \
+          TOPOLOGY=${TOPOLOGY} \
+          AUTH=${AUTH} \
+          SSL=${SSL} \
+          ORCHESTRATION_FILE=${ORCHESTRATION_FILE} \
+          sh ${DRIVERS_TOOLS}/.evergreen/run-orchestration.sh
+    - command: expansions.update
+      params:
+        file: mo-expansion.yml
+  
   cleanup:
     - command: shell.exec
       params:
@@ -397,6 +419,66 @@ functions:
           export ATLAS_TLS12_SRV="${atlas_tls_v12_uri_srv}"
           make -s evg-test-atlas
 
+  run-ocsp-test:
+    - command: shell.exec
+      type: test
+      params:
+        working_dir: src/go.mongodb.org/mongo-driver
+        script: |
+          ${PREPARE_SHELL}
+          export MONGO_GO_DRIVER_CA_FILE="$DRIVERS_TOOLS/.evergreen/ocsp/ca_ocsp.pem"
+          if [ "Windows_NT" = "$OS" ]; then # Magic variable in cygwin
+            export MONGO_GO_DRIVER_CA_FILE=$(cygpath -m $MONGO_GO_DRIVER_CA_FILE)
+          fi
+
+          set +o xtrace
+          AUTH="auth" \
+          SSL="ssl" \
+          TOPOLOGY="server" \
+          MONGODB_URI="${MONGODB_URI}" \
+          OCSP_TLS_SHOULD_SUCCEED="${OCSP_TLS_SHOULD_SUCCEED}" \
+          make evg-test-ocsp
+
+  run-valid-ocsp-server:
+    - command: shell.exec
+      params:
+        script: |
+          cd ${DRIVERS_TOOLS}/.evergreen/ocsp
+          /opt/mongodbtoolchain/v3/bin/python3 -m venv ./venv
+          ./venv/bin/pip3 install asn1crypto oscrypto bottle
+    - command: shell.exec
+      params:
+        background: true
+        script: |
+          cd ${DRIVERS_TOOLS}/.evergreen/ocsp
+
+          nohup ./venv/bin/python3 ocsp_mock.py \
+          --ca_file ca_ocsp.pem \
+          --ocsp_responder_cert ca_ocsp.crt \
+          --ocsp_responder_key ca_ocsp.key \
+          -p 8100 -v
+
+  run-revoked-ocsp-server:
+    - command: shell.exec
+      params:
+        script: |
+          cd ${DRIVERS_TOOLS}/.evergreen/ocsp
+          /opt/mongodbtoolchain/v3/bin/python3 -m venv ./venv
+          ./venv/bin/pip3 install asn1crypto oscrypto bottle
+    - command: shell.exec
+      params:
+        background: true
+        script: |
+          cd ${DRIVERS_TOOLS}/.evergreen/ocsp
+
+          nohup ./venv/bin/python3 ocsp_mock.py \
+          --ca_file ca_ocsp.pem \
+          --ocsp_responder_cert ca_ocsp.crt \
+          --ocsp_responder_key ca_ocsp.key \
+          -p 8100 \
+          -v \
+          --fault revoked
+
 pre:
   - func: fetch-source
   - func: prepare-resources
@@ -580,6 +662,81 @@ tasks:
           SSL: "ssl"
           MONGO_GO_DRIVER_COMPRESSOR: "zstd"
 
+  - name: test-ocsp-valid-cert-server-staples
+    tags: ["test", "standalone", "ocsp"]
+    commands:
+      - func: run-valid-ocsp-server
+      - func: ocsp-bootstrap-mongo-orchestration
+        vars:
+          ORCHESTRATION_FILE: "basic-tls-ocsp-mustStaple.json"
+      - func: run-ocsp-test
+        vars:
+          OCSP_TLS_SHOULD_SUCCEED: "true"
+
+  - name: test-ocsp-invalid-cert-server-staples
+    tags: ["test", "standalone", "ocsp"]
+    commands:
+      - func: run-revoked-ocsp-server
+      - func: ocsp-bootstrap-mongo-orchestration
+        vars:
+          ORCHESTRATION_FILE: "basic-tls-ocsp-mustStaple.json"
+      - func: run-ocsp-test
+        vars:
+          OCSP_TLS_SHOULD_SUCCEED: "false"
+
+  - name: test-ocsp-valid-cert-server-does-not-staple
+    tags: ["test", "standalone", "ocsp"]
+    commands:
+      - func: run-valid-ocsp-server
+      - func: ocsp-bootstrap-mongo-orchestration
+        vars:
+          ORCHESTRATION_FILE: "basic-tls-ocsp-disableStapling.json"
+      - func: run-ocsp-test
+        vars:
+          OCSP_TLS_SHOULD_SUCCEED: "true"
+
+  - name: test-ocsp-invalid-cert-server-does-not-staple
+    tags: ["test", "standalone", "ocsp"]
+    commands:
+      - func: run-revoked-ocsp-server
+      - func: ocsp-bootstrap-mongo-orchestration
+        vars:
+          ORCHESTRATION_FILE: "basic-tls-ocsp-disableStapling.json"
+      - func: run-ocsp-test
+        vars:
+          OCSP_TLS_SHOULD_SUCCEED: "false"
+
+  - name: test-ocsp-soft-fail
+    tags: ["test", "standalone", "ocsp"]
+    commands:
+      - func: ocsp-bootstrap-mongo-orchestration
+        vars:
+          ORCHESTRATION_FILE: "basic-tls-ocsp-disableStapling.json"
+      - func: run-ocsp-test
+        vars:
+          OCSP_TLS_SHOULD_SUCCEED: "true"
+
+  - name: test-ocsp-malicious-invalid-cert-mustStaple-server-does-not-staple
+    tags: ["test", "standalone", "ocsp"]
+    commands:
+      - func: run-revoked-ocsp-server
+      - func: ocsp-bootstrap-mongo-orchestration
+        vars:
+          ORCHESTRATION_FILE: "basic-tls-ocsp-mustStaple-disableStapling.json"
+      - func: run-ocsp-test
+        vars:
+          OCSP_TLS_SHOULD_SUCCEED: "false"
+
+  - name: test-ocsp-malicious-no-responder-mustStaple-server-does-not-staple
+    tags: ["test", "standalone", "ocsp"]
+    commands:
+      - func: ocsp-bootstrap-mongo-orchestration
+        vars:
+          ORCHESTRATION_FILE: "basic-tls-ocsp-mustStaple-disableStapling.json"
+      - func: run-ocsp-test
+        vars:
+          OCSP_TLS_SHOULD_SUCCEED: "false"
+
   - name: test-replicaset-noauth-nossl
     tags: ["test", "replicaset"]
     commands:
@@ -725,7 +882,7 @@ tasks:
           AUTH: "auth"
           SSL: "ssl"
           MONGO_GO_DRIVER_COMPRESSOR: "zstd"
-
+  
   - name: test-enterprise-auth-plain
     tags: ["test", "enterprise-auth"]
     commands:
@@ -907,25 +1064,25 @@ buildvariants:
     matrix_spec: { version: ["2.6", "3.0"], os-ssl-legacy: "*" }
     display_name: "${version} ${os-ssl-legacy}"
     tasks:
-      - name: ".test !.enterprise-auth !.compression"
+      - name: ".test !.enterprise-auth !.compression !.ocsp"
 
   - matrix_name: "tests-legacy-noauth-nossl"
     matrix_spec: { version: ["2.6", "3.0"], os-ssl-32: "*" }
     display_name: "${version} ${os-ssl-32}"
     tasks:
-      - name: ".test !.authssl !.enterprise-auth !.compression"
+      - name: ".test !.authssl !.enterprise-auth !.compression !.ocsp"
 
   - matrix_name: "tests-nonlegacy-servers"
     matrix_spec: { version: "3.2", os-ssl-32: "*" }
     display_name: "${version} ${os-ssl-32}"
     tasks:
-      - name: ".test !.enterprise-auth !.compression"
+      - name: ".test !.enterprise-auth !.compression !.ocsp"
 
   - matrix_name: "tests-nonlegacy-servers-with-snappy-support"
     matrix_spec: { version: "3.4", os-ssl-32: "*" }
     display_name: "${version} ${os-ssl-32}"
     tasks:
-      - name: ".test !.enterprise-auth !.zlib !.zstd"
+      - name: ".test !.enterprise-auth !.zlib !.zstd !.ocsp"
 
   - matrix_name: "tests-36-40-with-zlib-support"
     matrix_spec: { version: ["3.6", "4.0"], os-ssl-32: "*" }
