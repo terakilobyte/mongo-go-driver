@@ -171,10 +171,16 @@ func verifyResponseSignature(cfg config, res *ocsp.Response) error {
 		return nil
 	}
 
-	// There is a delegate. The initial call to ParseResponseForCert has already verified that the response was
-	// correctly signed by the delegate.
+	// RFC 6960 Section 4.2.2.2: The responder can return a certificate that is the issuer of the leaf certificate. In
+	// this case, there is no delegate and the issuer is already trusted. Return without additional checks.
+	if bytes.Equal(res.Certificate.RawSubject, cfg.issuer.RawSubject) {
+		return nil
+	}
 
-	// Verify that the delegate is authorized to sign responses.
+	// There is a delegate. The initial call to ParseResponseForCert has already verified that the response was
+	// correctly signed by the delegate. Verify that the delegate is authorized to sign OCSP responses and that the
+	// delegate has been signed by a certificate in the known verified chain.
+
 	var canSign bool
 	for _, extension := range res.Certificate.Extensions {
 		if extension.Id.Equal(ocspSigningExtensionID) {
@@ -186,8 +192,6 @@ func verifyResponseSignature(cfg config, res *ocsp.Response) error {
 		return errors.New("certificate reported in OCSP response does not have the OCSP-Signing extension")
 	}
 
-	// Find the delegate in the known certificate chain and verify that the delegate was correctly signed by the
-	// issuer.
 	issuer := getIssuer(res.Certificate, cfg.chain)
 	if issuer == nil {
 		return errors.New("issuer for certificate reported in OCSP response not found in certificate chain")
