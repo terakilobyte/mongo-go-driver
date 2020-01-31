@@ -117,11 +117,14 @@ func contactResponders(ctx context.Context, cfg config) (*ocsp.Response, error) 
 		// Use bytes.NewReader instead of bytes.NewBuffer because a bytes.Buffer is an owning representation and the
 		// docs recommend not using the underlying []byte after creating the buffer, so a new copy of requestBytes would
 		// be needed for each request.
-		httpRequest, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(requestBytes))
+		httpRequest, err := http.NewRequest("POST", endpoint, bytes.NewReader(requestBytes))
 		if err != nil {
 			continue
 		}
 		httpRequest.Header.Add("Content-Type", "application/ocsp-request")
+		if ctx != nil {
+			httpRequest = httpRequest.WithContext(ctx)
+		}
 
 		httpResponse, err := http.DefaultClient.Do(httpRequest)
 		if err != nil {
