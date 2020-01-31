@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/asn1"
 	"errors"
 	"fmt"
@@ -185,8 +186,8 @@ func verifyResponseSignature(cfg config, res *ocsp.Response) error {
 	// delegate has been signed by a certificate in the known verified chain.
 
 	var canSign bool
-	for _, extension := range res.Certificate.Extensions {
-		if extension.Id.Equal(ocspSigningExtensionID) {
+	for _, extKeyUsage := range res.Certificate.ExtKeyUsage {
+		if extKeyUsage == x509.ExtKeyUsageOCSPSigning {
 			canSign = true
 			break
 		}
